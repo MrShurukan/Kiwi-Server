@@ -1,79 +1,120 @@
 #include <SFML/Network.hpp>
+#include <fstream>
 #include <iostream>
 #include <list>
 
-int generateID(std::list< std::pair<int, sf::TcpSocket*> >& clients) {
-    bool matchFound = false;
-    int id;
-    do {
-        matchFound = false;
-        id = rand() % 10000;
-        for (auto it = clients.begin(); it != clients.end(); it++) {
-            if (it->first == id) {
-                matchFound = true;
+std::string generateID() {
+    return std::to_string(rand() % 100000);
+}
+
+void receiveFile(sf::TcpSocket* socket, std::ofstream& file) {
+    sf::SocketSelector timeoutSelector;
+    timeoutSelector.add(*socket);
+
+    while (true)
+    {
+        char Buffer[1024];
+        std::size_t Size = 0;
+        if (timeoutSelector.wait(sf::seconds(3))) {
+            socket->receive(Buffer, sizeof(Buffer), Size);
+            if (Size >= 3 && Buffer[Size-1] == Buffer[Size-2] && Buffer[Size-2] == Buffer[Size-3] && Buffer[Size-3] == '\xFF') {
+                std::cout << "Got to the end\n";
+                file.write(Buffer, Size-3);
                 break;
             }
+            std::cout << "Writing...\n";
+            file.write(Buffer, Size);
+        }
+        else {
+            std::cout << "File timeout.\n";
+            break;
         }
     }
-    while (matchFound);
 
-    return id;
+    file.close();
 }
 
 int main() {
     srand(time(nullptr));
-    std::cout << "Kiwi server v0.1\n";
+    std::cout << "Kiwi server v1.0-beta\n";
+    std::vector<sf::TcpSocket*> sockets;
+
+    int port = 8888;
+    //std::cout << "Enter a port: ";
+    //std::cin >> port;
 
     sf::TcpListener listener;
-    std::list< std::pair< int, sf::TcpSocket* > > clients;
-
     sf::SocketSelector selector;
 
-    if (listener.listen(25565) != sf::Socket::Done) {
-        std::cout << "Failed to open port\n";
+    if (listener.listen(port) != sf::Socket::Done) {
+        std::cout << "Couldn't start server on " << port << '\n';
         exit(1);
     }
-
+    std::cout << "Server started on " << port << '\n';
+        
     selector.add(listener);
 
     while (true) {
         if (selector.wait()) {
             if (selector.isReady(listener)) {
-                sf::TcpSocket* newClient = new sf::TcpSocket;
-                if (listener.accept(*newClient) != sf::Socket::Done) {
+                sf::TcpSocket* socket = new sf::TcpSocket;
+                if (listener.accept(*socket) != sf::Socket::Done) {
                     std::cout << "Error while accepting new client\n";
+                    delete socket;
                 }
                 else {
-                    int id = generateID(clients);
-                    std::cout << "Adding new client (" << id << ")\n";
-                    clients.push_back(std::make_pair(id, newClient));
-                    selector.add(*newClient);
+                    std::cout << "Adding new client\n";
+                    sockets.push_back(socket);
+                    selector.add(*socket);
                 }
             }
             else {
-                for (auto it = clients.begin(); it != clients.end(); it++) {
-                    if (selector.isReady(*it->second)) {
-                        sf::Packet packet, packet_copy;
-                        if (it->second->receive(packet) == sf::Socket::Done)
-                        {
-                            packet_copy = packet;
-                            std::string msg;
-                            packet_copy >> msg;
-                            std::cout << "Got message: " << msg << '\n';
-                            if (msg == "disconnect") {
-                                selector.remove(*it->second);
-                                clients.erase(it);
-                                continue;
+                for (auto it = sockets.begin(); it != sockets.end(); it++) {
+                    sf::TcpSocket* socket = *it;
+                    if (selector.isReady(*socket)) {
+                        sf::Packet packet;
+                        sf::Socket::Status status = socket->receive(packet);
+                        if (status == sf::Socket::Done) {
+                            std::string request;
+                            packet >> request;
+                            std::cout << "Got request: " << request << '\n';
+
+                            if (request == "uploadWav") {
+                                std::string fileName;
+                                packet >> fileName;
+                                fileName = fileName.substr(0, fileName.find_last_of('.')) + "_" + std::to_string(time(nullptr)) + ".wav";
+                                
+                                std::ofstream file("Sounds/" + fileName, std::ofstream::binary);
+                                receiveFile(socket, file);
+                                packet.clear();
+                                packet << "done";
+                                socket->send(packet);
+                            }
+                            else if (request == "uploadKiwi") {
+                                std::ifstream tester;
+                                std::string fileName;
+                                do {
+                                    fileName = generateID();
+                                    tester.open("Saves/" + fileName);
+                                } while (tester);
+
+                                std::ofstream file("Saves/" + fileName, std::ofstream::binary);
+                                receiveFile(socket, file);
+                                packet.clear();
+                                packet << fileName;
+                                socket->send(packet);
                             }
 
-                            int idToExclude = it->first;
-                            for (auto it2 = clients.begin(); it2 != clients.end(); it2++) {
-                                if (it2->first != idToExclude) {
-                                    if (it2->second->send(packet) != sf::Socket::Done) {
-                                        std::cout << "Sending to " << it2->first << " failed\n";
-                                    }
-                                }
-                            }
+                        }
+                        else if (status == sf::Socket::Disconnected) {
+                            selector.remove(*socket);
+                            delete socket;
+                            sockets.erase(it);
+                            std::cout << "Socket disconnected\n";
+                            break;
+                        }
+                        else {
+                            std::cout << "An error occured while trying to receive a packet\n";
                         }
                     }
                 }
